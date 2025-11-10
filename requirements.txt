@@ -1,0 +1,15 @@
+# FVG Trading Bot - Python Dependencies
+# For NinjaTrader ATI integration and real-time FVG detection
+
+# Core data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Standard library dependencies (included with Python, listed for reference)
+# - datetime
+# - pathlib
+# - logging
+# - csv
+# - time
+# - os
+# - sys
