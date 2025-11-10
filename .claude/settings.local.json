@@ -5,7 +5,12 @@
       "Bash(mkdir:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(dir:*)",
+      "Bash(echo:*)",
+      "Bash(\"C:\\Users\\Joshua\\Documents\\Projects\\FVG Bot\\trade_signals.csv\")",
+      "Bash(powershell -Command \"(Get-Item ''C:\\Users\\Joshua\\Documents\\Projects\\FVG Bot\\trade_signals.csv'').LastWriteTime = Get-Date\")",
+      "Bash(icacls \"C:\\Users\\Joshua\\Documents\\Projects\\FVG Bot\\trade_signals.csv\")"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -18,11 +18,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FVGATITradingBot:
-    def __init__(self, instrument='MES', historical_path='data/HistoricalData.csv', live_feed_path='data/LiveFeed.csv', signals_path='trade_signals.csv'):
+    def __init__(self, instrument='MES', historical_path='data/HistoricalData.csv', live_feed_path='data/LiveFeed.csv', signals_path='trade_signals.csv', trades_log_path='trades_taken.csv'):
         self.instrument = instrument
         self.historical_path = historical_path
         self.live_feed_path = live_feed_path
         self.signals_path = signals_path
+        self.trades_log_path = trades_log_path
 
         # FVG tracking
         self.active_fvgs = []
@@ -32,24 +33,76 @@ class FVGATITradingBot:
         # Trading state
         self.strategy_enabled = True
         self.max_position_size = 1  # Maximum contracts to trade
+        self.zone_cooldown_minutes = 60  # Don't re-trade same zone within 60 minutes
+        self.min_profit_target_points = 5.0  # Minimum profit target in points
 
-        # Initialize signals file
+        # Initialize files
         self.initialize_signals_file()
+        self.initialize_trades_log()
         
     def round_to_quarter(self, price):
         """Round price to nearest 0.25 to match NinjaTrader pricing"""
         return round(price * 4) / 4
+
+    def was_zone_recently_traded(self, zone_bottom, zone_top):
+        """Check if this zone was recently traded (within cooldown period)"""
+        try:
+            if not os.path.exists(self.trades_log_path):
+                return False
+
+            df = pd.read_csv(self.trades_log_path)
+            if df.empty:
+                return False
+
+            # Convert DateTime to datetime objects
+            df['DateTime'] = pd.to_datetime(df['DateTime'])
+
+            # Get current time
+            now = datetime.now()
+
+            # Check if any recent trades match this zone
+            for _, row in df.iterrows():
+                # Check if zone matches (within 0.5 points tolerance)
+                zone_matches = (abs(row['Zone_Bottom'] - zone_bottom) <= 0.5 and
+                               abs(row['Zone_Top'] - zone_top) <= 0.5)
+
+                if zone_matches:
+                    # Check if trade was within cooldown period
+                    trade_time = row['DateTime']
+                    minutes_since_trade = (now - trade_time).total_seconds() / 60
+
+                    if minutes_since_trade < self.zone_cooldown_minutes:
+                        logger.info(f"Zone {zone_bottom:.2f}-{zone_top:.2f} was traded {minutes_since_trade:.1f} min ago (cooldown: {self.zone_cooldown_minutes} min)")
+                        return True
+
+            return False
+        except Exception as e:
+            logger.error(f"Error checking trade history: {e}")
+            return False
     
     def initialize_signals_file(self):
-        """Initialize the trade signals CSV file"""
-        if not os.path.exists(self.signals_path):
-            with open(self.signals_path, 'w', newline='') as f:
+        """Initialize the trade signals CSV file - clears old signals on startup"""
+        # Always create fresh file on startup to prevent duplicate trades
+        with open(self.signals_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['DateTime', 'Signal', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target', 'Zone_Type', 'ATR'])
+        logger.info(f"Initialized fresh signals file: {self.signals_path}")
+
+    def initialize_trades_log(self):
+        """Initialize the trades taken log file - preserves historical trade data"""
+        # Only create header if file doesn't exist (preserve historical data)
+        if not os.path.exists(self.trades_log_path):
+            with open(self.trades_log_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['DateTime', 'Signal', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target', 'Zone_Type', 'ATR'])
+                writer.writerow(['DateTime', 'Signal', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target', 'Zone_Type', 'Zone_Bottom', 'Zone_Top', 'ATR'])
+            logger.info(f"Created new trades log file: {self.trades_log_path}")
+        else:
+            logger.info(f"Using existing trades log file: {self.trades_log_path}")
     
-    def generate_signal(self, signal_type, direction, entry_price, stop_loss, profit_target, zone_type, datetime, gap_size):
-        """Write trade signal to CSV file"""
+    def generate_signal(self, signal_type, direction, entry_price, stop_loss, profit_target, zone_type, datetime, gap_size, zone_bottom, zone_top):
+        """Write trade signal to both CSV files"""
         try:
+            # Write to trade_signals.csv (fresh file for NinjaTrader)
             with open(self.signals_path, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
@@ -62,7 +115,24 @@ class FVGATITradingBot:
                     zone_type,
                     f"{gap_size:.2f}"
                 ])
-            logger.info(f"Signal written: {direction} @ {entry_price:.2f}")
+
+            # Write to trades_taken.csv (persistent historical log)
+            with open(self.trades_log_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.strftime('%m/%d/%Y %H:%M:%S'),
+                    signal_type,
+                    direction,
+                    f"{entry_price:.2f}",
+                    f"{stop_loss:.2f}",
+                    f"{profit_target:.2f}",
+                    zone_type,
+                    f"{zone_bottom:.2f}",
+                    f"{zone_top:.2f}",
+                    f"{gap_size:.2f}"
+                ])
+
+            logger.info(f"Signal written: {direction} @ {entry_price:.2f} (Zone: {zone_bottom:.2f}-{zone_top:.2f})")
         except Exception as e:
             logger.error(f"Error writing signal: {e}")
         
@@ -259,37 +329,63 @@ class FVGATITradingBot:
             return
 
         for fvg in self.active_fvgs:
+            # Skip if already traded or filled
             if fvg['trade_taken'] or fvg['filled']:
                 continue
 
-            # Calculate distance to zone
-            distance_to_bottom = abs(current_price - fvg['bottom'])
-            distance_to_top = abs(current_price - fvg['top'])
-            min_distance = min(distance_to_bottom, distance_to_top)
+            # Check if this zone was recently traded (cooldown protection)
+            if self.was_zone_recently_traded(fvg['bottom'], fvg['top']):
+                fvg['trade_taken'] = True  # Mark as taken to skip until next session
+                continue
 
-            # Check if price is within 2.5 points of zone
-            if min_distance <= 2.5:
+            # Check if price has ENTERED the zone boundaries
+            price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
+
+            if price_in_zone:
+                # Log zone entry detection
+                logger.info(f"*** PRICE IN ZONE DETECTED ***")
+                logger.info(f"  Zone Type: {fvg['type'].upper()}")
+                logger.info(f"  Zone Range: {fvg['bottom']:.2f} - {fvg['top']:.2f}")
+                logger.info(f"  Current Price: {current_price:.2f}")
+                logger.info(f"  Price Check: {current_price:.2f} >= {fvg['bottom']:.2f} AND {current_price:.2f} <= {fvg['top']:.2f} = TRUE")
+
+                # Price is inside the zone - trigger trade ONCE
                 if fvg['type'] == 'bullish':
-                    self.evaluate_short_entry(fvg, current_price)  # SHORT bullish zones
+                    # For bullish zones: SHORT when price enters zone from above
+                    self.evaluate_short_entry(fvg, current_price)
+                    # Flag is set inside evaluate function to prevent duplicates
                 elif fvg['type'] == 'bearish':
-                    self.evaluate_long_entry(fvg, current_price)   # LONG bearish zones
+                    # For bearish zones: LONG when price enters zone from below
+                    self.evaluate_long_entry(fvg, current_price)
+                    # Flag is set inside evaluate function to prevent duplicates
     
     def evaluate_long_entry(self, fvg, current_price):
         """Evaluate long entry on BEARISH FVG retest (fill bottom to top)"""
         logger.info(f"=== EVALUATING LONG ENTRY ON BEARISH FVG ===")
 
-        # Calculate limit entry at zone bottom (bearish zones fill bottom to top)
-        entry_price = self.round_to_quarter(fvg['bottom'])
+        # Use current price as entry since price is inside the zone
+        entry_price = self.round_to_quarter(current_price)
         stop_loss = self.round_to_quarter(fvg['bottom'] - fvg['gap_size'])
         profit_target = self.round_to_quarter(fvg['top'])
 
+        # Calculate potential profit
+        potential_profit = profit_target - entry_price
+
         logger.info(f"BEARISH FVG LONG SETUP:")
         logger.info(f"  Zone: {fvg['bottom']:.2f} - {fvg['top']:.2f} ({fvg['gap_size']:.2f}pts)")
-        logger.info(f"  Entry Price (Limit): {entry_price:.2f} (zone bottom)")
+        logger.info(f"  Current Price: {current_price:.2f}")
+        logger.info(f"  Entry Price (Market): {entry_price:.2f}")
         logger.info(f"  Stop Loss: {stop_loss:.2f}")
         logger.info(f"  Profit Target: {profit_target:.2f} (zone top)")
+        logger.info(f"  Potential Profit: {potential_profit:.2f}pts")
 
-        # Write trade signal to CSV
+        # Check minimum profit target requirement
+        if potential_profit < self.min_profit_target_points:
+            logger.info(f"  *** TRADE REJECTED: Profit target {potential_profit:.2f}pts < minimum {self.min_profit_target_points:.2f}pts ***")
+            fvg['trade_taken'] = True  # Mark as taken so we don't re-evaluate
+            return
+
+        # Write trade signal to both CSV files
         self.generate_signal(
             signal_type='FVG_RETEST',
             direction='LONG',
@@ -298,7 +394,9 @@ class FVGATITradingBot:
             profit_target=profit_target,
             zone_type=fvg['type'],
             datetime=datetime.now(),
-            gap_size=fvg['gap_size']
+            gap_size=fvg['gap_size'],
+            zone_bottom=fvg['bottom'],
+            zone_top=fvg['top']
         )
 
         fvg['trade_taken'] = True
@@ -308,18 +406,29 @@ class FVGATITradingBot:
         """Evaluate short entry on BULLISH FVG retest (fill top to bottom)"""
         logger.info(f"=== EVALUATING SHORT ENTRY ON BULLISH FVG ===")
 
-        # Calculate limit entry at zone top (bullish zones fill top to bottom)
-        entry_price = self.round_to_quarter(fvg['top'])
+        # Use current price as entry since price is inside the zone
+        entry_price = self.round_to_quarter(current_price)
         stop_loss = self.round_to_quarter(fvg['top'] + fvg['gap_size'])
         profit_target = self.round_to_quarter(fvg['bottom'])
 
+        # Calculate potential profit (for SHORT: entry - target)
+        potential_profit = entry_price - profit_target
+
         logger.info(f"BULLISH FVG SHORT SETUP:")
         logger.info(f"  Zone: {fvg['bottom']:.2f} - {fvg['top']:.2f} ({fvg['gap_size']:.2f}pts)")
-        logger.info(f"  Entry Price (Limit): {entry_price:.2f} (zone top)")
+        logger.info(f"  Current Price: {current_price:.2f}")
+        logger.info(f"  Entry Price (Market): {entry_price:.2f}")
         logger.info(f"  Stop Loss: {stop_loss:.2f}")
         logger.info(f"  Profit Target: {profit_target:.2f} (zone bottom)")
+        logger.info(f"  Potential Profit: {potential_profit:.2f}pts")
 
-        # Write trade signal to CSV
+        # Check minimum profit target requirement
+        if potential_profit < self.min_profit_target_points:
+            logger.info(f"  *** TRADE REJECTED: Profit target {potential_profit:.2f}pts < minimum {self.min_profit_target_points:.2f}pts ***")
+            fvg['trade_taken'] = True  # Mark as taken so we don't re-evaluate
+            return
+
+        # Write trade signal to both CSV files
         self.generate_signal(
             signal_type='FVG_RETEST',
             direction='SHORT',
@@ -328,7 +437,9 @@ class FVGATITradingBot:
             profit_target=profit_target,
             zone_type=fvg['type'],
             datetime=datetime.now(),
-            gap_size=fvg['gap_size']
+            gap_size=fvg['gap_size'],
+            zone_bottom=fvg['bottom'],
+            zone_top=fvg['top']
         )
 
         fvg['trade_taken'] = True
@@ -348,6 +459,28 @@ class FVGATITradingBot:
             elif fvg['type'] == 'bearish' and current_bar['Close'] >= fvg['top']:
                 fvg['filled'] = True
                 logger.info(f"BEARISH FVG FILLED at {current_bar['Close']:.2f}")
+
+    def check_live_fvg_fills(self, current_price):
+        """Check if any FVGs have been filled by current live price"""
+        for fvg in self.active_fvgs:
+            if fvg['filled']:
+                continue
+
+            # Bearish FVG fills when price reaches the TOP (zone filled completely)
+            if fvg['type'] == 'bearish' and current_price >= fvg['top']:
+                fvg['filled'] = True
+                logger.info(f"*** BEARISH FVG FILLED (LIVE) ***")
+                logger.info(f"  Zone: {fvg['bottom']:.2f} - {fvg['top']:.2f}")
+                logger.info(f"  Fill Price: {current_price:.2f}")
+                logger.info(f"  Zone removed from active list")
+
+            # Bullish FVG fills when price reaches the BOTTOM (zone filled completely)
+            elif fvg['type'] == 'bullish' and current_price <= fvg['bottom']:
+                fvg['filled'] = True
+                logger.info(f"*** BULLISH FVG FILLED (LIVE) ***")
+                logger.info(f"  Zone: {fvg['bottom']:.2f} - {fvg['top']:.2f}")
+                logger.info(f"  Fill Price: {current_price:.2f}")
+                logger.info(f"  Zone removed from active list")
     
     def load_historical_fvgs(self):
         """Load FVGs from historical hourly data on startup"""
@@ -499,6 +632,9 @@ class FVGATITradingBot:
                 current_price = self.read_current_price()
 
                 if current_price is not None:
+                    # Check if any zones have been filled (real-time)
+                    self.check_live_fvg_fills(current_price)
+
                     # Check for trade signals based on current price
                     self.check_fvg_retest_signals(current_price)
 
