@@ -41,7 +41,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string currentSignalId = "";
         private double signalEntryPrice = 0;
         private double signalStopLoss = 0;
-        private double signalProfitTarget = 0;
+        private double signalProfitTarget1 = 0;
+        private double signalProfitTarget2 = 0;
+        private int signalQuantity1 = 0;
+        private int signalQuantity2 = 0;
         private string signalDirection = "";
         private string signalType = "";
         private string zoneType = "";
@@ -52,9 +55,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool inPosition = false;
         private DateTime entryTime = DateTime.MinValue;
         private double actualEntryPrice = 0;
+        private bool firstExitTaken = false;
 
         // File check interval (seconds)
         private int fileCheckInterval = 2;
+
+        // Position sizing (total contracts)
+        private int contractQuantity = 3;
 
         #endregion
         
@@ -85,6 +92,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 SignalsFilePath = @"C:\Users\Joshua\Documents\Projects\FVG Bot\trade_signals.csv";
                 TradesLogFilePath = @"C:\Users\Joshua\Documents\Projects\FVG Bot\trades_taken.csv";
                 FileCheckInterval = 2;
+                ContractQuantity = 3;
             }
             else if (State == State.Configure)
             {
@@ -105,12 +113,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Force immediate file check by setting lastFileCheckTime to far past
                 lastFileCheckTime = DateTime.MinValue;
 
-                Print($"=== FVG Strategy Initialized ===");
-                Print($"Signals File Path: {signalsFilePath}");
-                Print($"Trades Log Path: {tradesLogFilePath}");
-                Print($"File Check Interval: {FileCheckInterval} seconds");
-                Print($"File exists: {File.Exists(signalsFilePath)}");
-                Print($"================================");
+                Print($"FVG Strategy Initialized - Monitoring signals every {FileCheckInterval} seconds");
             }
         }
 
@@ -122,7 +125,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Check for new signals periodically
             if ((DateTime.Now - lastFileCheckTime).TotalSeconds >= FileCheckInterval)
             {
-                Print($"[{DateTime.Now:HH:mm:ss}] Checking for new signals...");
                 CheckForNewSignals();
                 lastFileCheckTime = DateTime.Now;
             }
@@ -133,46 +135,28 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void CheckForNewSignals()
         {
-            Print($"CheckForNewSignals() called - checking file: {signalsFilePath}");
-
             if (!File.Exists(signalsFilePath))
-            {
-                Print($"ERROR: Signals file does not exist: {signalsFilePath}");
                 return;
-            }
-
-            Print($"Signals file exists, checking modification time...");
 
             try
             {
                 // Check if file has been modified
                 DateTime currentModTime = File.GetLastWriteTime(signalsFilePath);
-                Print($"File last modified: {currentModTime:MM/dd/yyyy HH:mm:ss}");
-                Print($"Last processed time: {lastFileModified:MM/dd/yyyy HH:mm:ss}");
 
                 if (currentModTime <= lastFileModified)
-                {
-                    Print($"File has not changed since last check - skipping");
                     return; // File hasn't changed
-                }
 
                 lastFileModified = currentModTime;
-                Print($"File HAS been modified - reading signals...");
 
                 // Read all lines from the CSV file
                 string[] lines = File.ReadAllLines(signalsFilePath);
-                Print($"Read {lines.Length} lines from file");
 
                 // Skip header row
                 if (lines.Length <= 1)
-                {
-                    Print($"No signals found (only header row)");
                     return;
-                }
 
                 // Process the last (most recent) signal
                 string lastLine = lines[lines.Length - 1];
-                Print($"Processing signal: {lastLine}");
                 ProcessSignalLine(lastLine);
 
                 // Clear the signal file after processing (keep only header)
@@ -181,7 +165,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             catch (Exception ex)
             {
                 Print($"ERROR reading signals file: {ex.Message}");
-                Print($"Stack trace: {ex.StackTrace}");
             }
         }
 
@@ -192,9 +175,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Rewrite file with only header row
                 using (StreamWriter sw = new StreamWriter(signalsFilePath, false))
                 {
-                    sw.WriteLine("DateTime,Signal,Direction,Entry_Price,Stop_Loss,Profit_Target,Zone_Type,ATR");
+                    sw.WriteLine("DateTime,Signal,Direction,Entry_Price,Stop_Loss,Profit_Target_1,Profit_Target_2,Quantity_1,Quantity_2,Zone_Type,ATR");
                 }
-                Print($"Signal file cleared - ready for new signals");
             }
             catch (Exception ex)
             {
@@ -204,38 +186,27 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void ProcessSignalLine(string line)
         {
-            Print($"=== ProcessSignalLine START ===");
             try
             {
-                // Parse CSV line: DateTime,Signal,Direction,Entry_Price,Stop_Loss,Profit_Target,Zone_Type,ATR
+                // Parse CSV line: DateTime,Signal,Direction,Entry_Price,Stop_Loss,Profit_Target_1,Profit_Target_2,Quantity_1,Quantity_2,Zone_Type,ATR
                 string[] parts = line.Split(',');
-                Print($"Split into {parts.Length} parts");
 
-                if (parts.Length < 8)
+                if (parts.Length < 11)
                 {
-                    Print($"ERROR: Not enough parts in CSV line (expected 8, got {parts.Length})");
+                    Print($"ERROR: Invalid signal format (expected 11 fields, got {parts.Length})");
                     return;
                 }
 
                 // Create unique signal ID based on datetime and direction
                 string signalId = $"{parts[0]}_{parts[2]}";
-                Print($"Signal ID: {signalId}");
 
                 // Skip if already processed
                 if (processedSignals.Contains(signalId))
-                {
-                    Print($"SKIPPED: Signal already processed (ID: {signalId})");
                     return;
-                }
-
-                Print($"Current position: {Position.MarketPosition}");
 
                 // Skip if already in position
                 if (Position.MarketPosition != MarketPosition.Flat)
-                {
-                    Print($"SKIPPED: Already in position ({Position.MarketPosition})");
                     return;
-                }
 
                 // Parse all signal data
                 DateTime.TryParse(parts[0].Trim(), out signalDateTime);
@@ -243,69 +214,48 @@ namespace NinjaTrader.NinjaScript.Strategies
                 signalDirection = parts[2].Trim();
                 double.TryParse(parts[3], out signalEntryPrice);
                 double.TryParse(parts[4], out signalStopLoss);
-                double.TryParse(parts[5], out signalProfitTarget);
-                zoneType = parts[6].Trim();
-                double.TryParse(parts[7], out signalATR);
-
-                Print($"Parsed signal: {signalDirection} @ {signalEntryPrice}, SL: {signalStopLoss}, PT: {signalProfitTarget}");
+                double.TryParse(parts[5], out signalProfitTarget1);
+                double.TryParse(parts[6], out signalProfitTarget2);
+                int.TryParse(parts[7], out signalQuantity1);
+                int.TryParse(parts[8], out signalQuantity2);
+                zoneType = parts[9].Trim();
+                double.TryParse(parts[10], out signalATR);
 
                 // Store signal information
                 currentSignalId = signalId;
+                firstExitTaken = false;
 
                 // Execute trade based on direction
                 if (signalDirection.ToUpper() == "LONG")
                 {
-                    Print($"Executing LONG entry...");
                     ExecuteLongEntry();
                 }
                 else if (signalDirection.ToUpper() == "SHORT")
                 {
-                    Print($"Executing SHORT entry...");
                     ExecuteShortEntry();
                 }
 
                 // Mark signal as processed
                 processedSignals.Add(signalId);
-                Print($"Signal marked as processed: {signalId}");
             }
             catch (Exception ex)
             {
                 Print($"ERROR processing signal: {ex.Message}");
-                Print($"Stack trace: {ex.StackTrace}");
             }
-            Print($"=== ProcessSignalLine END ===");
         }
 
         private void ExecuteLongEntry()
         {
-            Print($"=== LONG ENTRY DIAGNOSTICS ===");
-            Print($"Instrument: {Instrument.FullName}");
-            Print($"Current Bar Time: {Time[0]:MM/dd/yyyy HH:mm:ss}");
-            Print($"Current Bar Close: {Close[0]:F2}");
-            Print($"State: {State}");
-            Print($"Historical: {Historical}");
-            Print($"Signal Entry Price: {signalEntryPrice:F2}");
-            Print($"================================");
-
-            EnterLong(1, "FVG_Long");
+            EnterLong(contractQuantity, "FVG_Long");
             inPosition = true;
-            Print($"LONG Signal Received - Entry: MARKET, SL: {signalStopLoss:F2}, PT: {signalProfitTarget:F2}");
+            Print($"[SIGNAL] LONG {signalType} - Entry: MARKET ({contractQuantity} contracts)");
         }
 
         private void ExecuteShortEntry()
         {
-            Print($"=== SHORT ENTRY DIAGNOSTICS ===");
-            Print($"Instrument: {Instrument.FullName}");
-            Print($"Current Bar Time: {Time[0]:MM/dd/yyyy HH:mm:ss}");
-            Print($"Current Bar Close: {Close[0]:F2}");
-            Print($"State: {State}");
-            Print($"Historical: {Historical}");
-            Print($"Signal Entry Price: {signalEntryPrice:F2}");
-            Print($"================================");
-
-            EnterShort(1, "FVG_Short");
+            EnterShort(contractQuantity, "FVG_Short");
             inPosition = true;
-            Print($"SHORT Signal Received - Entry: MARKET, SL: {signalStopLoss:F2}, PT: {signalProfitTarget:F2}");
+            Print($"[SIGNAL] SHORT {signalType} - Entry: MARKET ({contractQuantity} contracts)");
         }
 
         private void ManagePosition()
@@ -314,7 +264,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 inPosition = false;
                 currentSignalId = "";
-                Print("Position closed");
             }
         }
 
@@ -327,18 +276,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     using (StreamWriter sw = new StreamWriter(tradesLogFilePath, false))
                     {
-                        sw.WriteLine("Entry_DateTime,Signal_DateTime,Signal_Type,Direction,Entry_Price,Stop_Loss,Profit_Target,Zone_Type,ATR,Actual_Entry_Price");
+                        sw.WriteLine("Entry_DateTime,Signal_DateTime,Signal_Type,Direction,Entry_Price,Stop_Loss,Profit_Target_1,Profit_Target_2,Quantity_1,Quantity_2,Zone_Type,ATR,Actual_Entry_Price");
                     }
-                    Print($"Created trades log file: {tradesLogFilePath}");
-                }
-                else
-                {
-                    Print($"Using existing trades log file: {tradesLogFilePath}");
                 }
             }
             catch (Exception ex)
             {
-                Print($"Error initializing trades log file: {ex.Message}");
+                Print($"ERROR initializing trades log file: {ex.Message}");
             }
         }
 
@@ -346,16 +290,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             try
             {
-                // Format: Entry_DateTime,Signal_DateTime,Signal_Type,Direction,Entry_Price,Stop_Loss,Profit_Target,Zone_Type,ATR,Actual_Entry_Price
-                // Note: We don't have Zone_Bottom/Zone_Top in the signal, so we skip them
-                string logEntry = string.Format("{0},{1},{2},{3},{4:F2},{5:F2},{6:F2},{7},{8:F2},{9:F2}",
-                    DateTime.Now.ToString("MM/dd/yyyy HH:mm:ss"),  // Use actual current time for entry
+                // Format: Entry_DateTime,Signal_DateTime,Signal_Type,Direction,Entry_Price,Stop_Loss,Profit_Target_1,Profit_Target_2,Quantity_1,Quantity_2,Zone_Type,ATR,Actual_Entry_Price
+                string logEntry = string.Format("{0},{1},{2},{3},{4:F2},{5:F2},{6:F2},{7:F2},{8},{9},{10},{11:F2},{12:F2}",
+                    DateTime.Now.ToString("MM/dd/yyyy HH:mm:ss"),
                     signalDateTime.ToString("MM/dd/yyyy HH:mm:ss"),
                     signalType,
                     signalDirection,
                     signalEntryPrice,
                     signalStopLoss,
-                    signalProfitTarget,
+                    signalProfitTarget1,
+                    signalProfitTarget2,
+                    signalQuantity1,
+                    signalQuantity2,
                     zoneType,
                     signalATR,
                     actualEntryPrice
@@ -365,8 +311,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     sw.WriteLine(logEntry);
                 }
-
-                Print($"Trade logged: Entry={actualEntryPrice:F2}, SL={signalStopLoss:F2}, PT={signalProfitTarget:F2}");
             }
             catch (Exception ex)
             {
@@ -384,30 +328,47 @@ namespace NinjaTrader.NinjaScript.Strategies
                     actualEntryPrice = execution.Price;
                     entryTime = execution.Time;
 
-                    // Calculate stop/target distances from SIGNAL prices
+                    // Calculate distances from SIGNAL prices
                     double stopDistance = Math.Abs(signalStopLoss - signalEntryPrice);
-                    double targetDistance = Math.Abs(signalProfitTarget - signalEntryPrice);
+                    double target1Distance = Math.Abs(signalProfitTarget1 - signalEntryPrice);
+                    double target2Distance = Math.Abs(signalProfitTarget2 - signalEntryPrice);
 
-                    Print($"Stop Distance: {stopDistance:F2}, Target Distance: {targetDistance:F2}");
-
-                    // Set stop loss and profit target based on ACTUAL fill price
+                    // Set profit targets and stop loss based on ACTUAL fill price
                     if (Position.MarketPosition == MarketPosition.Long)
                     {
-                        double actualTarget = actualEntryPrice + targetDistance;
+                        double actualTarget1 = actualEntryPrice + target1Distance;
+                        double actualTarget2 = actualEntryPrice + target2Distance;
                         double actualStop = actualEntryPrice - stopDistance;
 
-                        SetProfitTarget(execution.Order.Name, CalculationMode.Price, actualTarget);
+                        // Set first profit target for partial exit (e.g., 2 contracts at 5 points)
+                        SetProfitTarget(execution.Order.Name, CalculationMode.Price, actualTarget1, signalQuantity1);
+                        // Set second profit target for remaining contract (zone boundary)
+                        SetProfitTarget(execution.Order.Name, CalculationMode.Price, actualTarget2, signalQuantity2);
+                        // Set stop loss for all contracts
                         SetStopLoss(execution.Order.Name, CalculationMode.Price, actualStop, false);
-                        Print($"LONG Filled at {actualEntryPrice:F2} - Target: {actualTarget:F2}, Stop: {actualStop:F2}");
+
+                        Print($"[FILLED] LONG {quantity} contracts @ {actualEntryPrice:F2}");
+                        Print($"  PT1: {actualTarget1:F2} ({signalQuantity1} contracts, +{target1Distance:F2}pts)");
+                        Print($"  PT2: {actualTarget2:F2} ({signalQuantity2} contracts, +{target2Distance:F2}pts)");
+                        Print($"  SL: {actualStop:F2} (-{stopDistance:F2}pts)");
                     }
                     else if (Position.MarketPosition == MarketPosition.Short)
                     {
-                        double actualTarget = actualEntryPrice - targetDistance;
+                        double actualTarget1 = actualEntryPrice - target1Distance;
+                        double actualTarget2 = actualEntryPrice - target2Distance;
                         double actualStop = actualEntryPrice + stopDistance;
 
-                        SetProfitTarget(execution.Order.Name, CalculationMode.Price, actualTarget);
+                        // Set first profit target for partial exit (e.g., 2 contracts at 5 points)
+                        SetProfitTarget(execution.Order.Name, CalculationMode.Price, actualTarget1, signalQuantity1);
+                        // Set second profit target for remaining contract (zone boundary)
+                        SetProfitTarget(execution.Order.Name, CalculationMode.Price, actualTarget2, signalQuantity2);
+                        // Set stop loss for all contracts
                         SetStopLoss(execution.Order.Name, CalculationMode.Price, actualStop, false);
-                        Print($"SHORT Filled at {actualEntryPrice:F2} - Target: {actualTarget:F2}, Stop: {actualStop:F2}");
+
+                        Print($"[FILLED] SHORT {quantity} contracts @ {actualEntryPrice:F2}");
+                        Print($"  PT1: {actualTarget1:F2} ({signalQuantity1} contracts, -{target1Distance:F2}pts)");
+                        Print($"  PT2: {actualTarget2:F2} ({signalQuantity2} contracts, -{target2Distance:F2}pts)");
+                        Print($"  SL: {actualStop:F2} (+{stopDistance:F2}pts)");
                     }
 
                     // Log the trade to trades_taken.csv
@@ -427,7 +388,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                         else
                             pnl = (actualEntryPrice - exitPrice) * quantity;
 
-                        Print($"PROFIT TARGET Hit at {exitPrice:F2} - P/L: ${pnl:F2}");
+                        if (!firstExitTaken)
+                        {
+                            Print($"[EXIT 1/{contractQuantity}] PROFIT TARGET @ {exitPrice:F2} | {quantity} contracts | P/L: ${pnl:F2}");
+                            firstExitTaken = true;
+                        }
+                        else
+                        {
+                            Print($"[EXIT 2/{contractQuantity}] PROFIT TARGET @ {exitPrice:F2} | {quantity} contracts | P/L: ${pnl:F2}");
+                        }
                     }
                     else if (execution.Order.Name.Contains("Stop loss"))
                     {
@@ -436,7 +405,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         else
                             pnl = (actualEntryPrice - exitPrice) * quantity;
 
-                        Print($"STOP LOSS Hit at {exitPrice:F2} - P/L: ${pnl:F2}");
+                        Print($"[EXIT] STOP LOSS @ {exitPrice:F2} | {quantity} contracts | P/L: ${pnl:F2}");
                     }
                 }
             }
@@ -444,22 +413,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         
         protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, int quantity, int filled, double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string comment)
         {
-            if (orderState == OrderState.Filled)
-                Print($"{order.Name} filled at {averageFillPrice:F2}");
-            else if (orderState == OrderState.Rejected)
-                Print($"Order rejected: {order.Name} - {comment}");
+            if (orderState == OrderState.Rejected)
+                Print($"[ERROR] Order rejected: {order.Name} - {comment}");
         }
         
         protected override void OnPositionUpdate(Position position, double averagePrice, int quantity, MarketPosition marketPosition)
         {
             if (marketPosition == MarketPosition.Flat)
             {
-                Print("Position flat");
                 inPosition = false;
-            }
-            else
-            {
-                Print($"Position: {marketPosition}, Qty: {quantity}, Avg Price: {averagePrice:F2}");
             }
         }
         
@@ -488,6 +450,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             get { return fileCheckInterval; }
             set { fileCheckInterval = value; }
+        }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name="Contract Quantity", Description="Number of contracts to trade per signal", Order=4, GroupName="FVG Parameters")]
+        public int ContractQuantity
+        {
+            get { return contractQuantity; }
+            set { contractQuantity = Math.Max(1, value); }
         }
 
         #endregion
