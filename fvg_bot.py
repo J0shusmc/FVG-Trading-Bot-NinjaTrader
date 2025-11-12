@@ -13,6 +13,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 import logging
+import subprocess
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ class FVGATITradingBot:
 
         # Trading state
         self.strategy_enabled = True
-        self.max_position_size = 1  # Maximum contracts to trade
+        self.max_position_size = 3  # Trade 3 contracts total
+        self.partial_exit_qty = 2  # Close 2 contracts at 5 points
+        self.partial_exit_points = 5.0  # Exit 2 contracts at 5 points profit
         self.zone_cooldown_minutes = 60  # Don't re-trade same zone within 60 minutes
         self.min_profit_target_points = 5.0  # Minimum profit target in points
 
@@ -54,8 +57,8 @@ class FVGATITradingBot:
             if df.empty:
                 return False
 
-            # Convert DateTime to datetime objects
-            df['DateTime'] = pd.to_datetime(df['DateTime'])
+            # Convert Entry_DateTime to datetime objects
+            df['Entry_DateTime'] = pd.to_datetime(df['Entry_DateTime'])
 
             # Get current time
             now = datetime.now()
@@ -68,7 +71,7 @@ class FVGATITradingBot:
 
                 if zone_matches:
                     # Check if trade was within cooldown period
-                    trade_time = row['DateTime']
+                    trade_time = row['Entry_DateTime']
                     minutes_since_trade = (now - trade_time).total_seconds() / 60
 
                     if minutes_since_trade < self.zone_cooldown_minutes:
@@ -85,7 +88,7 @@ class FVGATITradingBot:
         # Always create fresh file on startup to prevent duplicate trades
         with open(self.signals_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['DateTime', 'Signal', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target', 'Zone_Type', 'ATR'])
+            writer.writerow(['DateTime', 'Signal', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target_1', 'Profit_Target_2', 'Quantity_1', 'Quantity_2', 'Zone_Type', 'ATR'])
         logger.info(f"Initialized fresh signals file: {self.signals_path}")
 
     def initialize_trades_log(self):
@@ -94,38 +97,48 @@ class FVGATITradingBot:
         if not os.path.exists(self.trades_log_path):
             with open(self.trades_log_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['DateTime', 'Signal', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target', 'Zone_Type', 'Zone_Bottom', 'Zone_Top', 'ATR'])
+                writer.writerow(['Entry_DateTime', 'Signal_DateTime', 'Signal_Type', 'Direction', 'Entry_Price', 'Stop_Loss', 'Profit_Target_1', 'Profit_Target_2', 'Quantity_1', 'Quantity_2', 'Zone_Type', 'Zone_Bottom', 'Zone_Top', 'ATR'])
             logger.info(f"Created new trades log file: {self.trades_log_path}")
         else:
             logger.info(f"Using existing trades log file: {self.trades_log_path}")
     
-    def generate_signal(self, signal_type, direction, entry_price, stop_loss, profit_target, zone_type, datetime, gap_size, zone_bottom, zone_top):
-        """Write trade signal to both CSV files"""
+    def generate_signal(self, signal_type, direction, entry_price, stop_loss, profit_target_1, profit_target_2, qty_1, qty_2, zone_type, signal_datetime, gap_size, zone_bottom, zone_top):
+        """Write trade signal to both CSV files with multi-contract exit strategy"""
         try:
             # Write to trade_signals.csv (fresh file for NinjaTrader)
             with open(self.signals_path, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    datetime.strftime('%m/%d/%Y %H:%M:%S'),
+                    signal_datetime.strftime('%m/%d/%Y %H:%M:%S'),
                     signal_type,
                     direction,
                     f"{entry_price:.2f}",
                     f"{stop_loss:.2f}",
-                    f"{profit_target:.2f}",
+                    f"{profit_target_1:.2f}",
+                    f"{profit_target_2:.2f}",
+                    qty_1,
+                    qty_2,
                     zone_type,
                     f"{gap_size:.2f}"
                 ])
 
             # Write to trades_taken.csv (persistent historical log)
+            # Entry_DateTime = when we write the signal (now)
+            # Signal_DateTime = when the signal was generated
+            entry_datetime = datetime.now()
             with open(self.trades_log_path, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    datetime.strftime('%m/%d/%Y %H:%M:%S'),
+                    entry_datetime.strftime('%m/%d/%Y %H:%M:%S'),  # Entry_DateTime
+                    signal_datetime.strftime('%m/%d/%Y %H:%M:%S'),  # Signal_DateTime
                     signal_type,
                     direction,
                     f"{entry_price:.2f}",
                     f"{stop_loss:.2f}",
-                    f"{profit_target:.2f}",
+                    f"{profit_target_1:.2f}",
+                    f"{profit_target_2:.2f}",
+                    qty_1,
+                    qty_2,
                     zone_type,
                     f"{zone_bottom:.2f}",
                     f"{zone_top:.2f}",
@@ -133,6 +146,7 @@ class FVGATITradingBot:
                 ])
 
             logger.info(f"Signal written: {direction} @ {entry_price:.2f} (Zone: {zone_bottom:.2f}-{zone_top:.2f})")
+            logger.info(f"  Exit Strategy: {qty_1} contracts @ {profit_target_1:.2f}pts profit, {qty_2} contracts @ zone boundary")
         except Exception as e:
             logger.error(f"Error writing signal: {e}")
         
@@ -274,8 +288,13 @@ class FVGATITradingBot:
             self.last_processed_bar_time = latest_bar_time
     
     def clear_screen(self):
-        """Clear the console screen"""
-        os.system('cls' if os.name == 'nt' else 'clear')
+        """Clear screen - optimized for Windows"""
+        if os.name == 'nt':
+            # Windows: use standard os.system for proper clearing
+            os.system('cls')
+        else:
+            # Unix: use ANSI codes
+            os.system('clear')
     
     def find_new_fvgs(self, df, current_index):
         """Find new FVGs in the latest price data"""
@@ -365,23 +384,29 @@ class FVGATITradingBot:
 
         # Use current price as entry since price is inside the zone
         entry_price = self.round_to_quarter(current_price)
-        stop_loss = self.round_to_quarter(fvg['bottom'] - fvg['gap_size'])
-        profit_target = self.round_to_quarter(fvg['top'])
+        # Stop loss: minimum 10 points below entry or gap size, whichever is larger
+        stop_distance = max(10.0, fvg['gap_size'])
+        stop_loss = self.round_to_quarter(fvg['bottom'] - stop_distance)
 
-        # Calculate potential profit
-        potential_profit = profit_target - entry_price
+        # Exit strategy: 2 contracts at 5 points, 1 contract at zone top
+        profit_target_1 = self.round_to_quarter(entry_price + self.partial_exit_points)
+        profit_target_2 = self.round_to_quarter(fvg['top'])  # Zone boundary for final contract
 
-        logger.info(f"BEARISH FVG LONG SETUP:")
+        # Calculate potential profit for both exits
+        potential_profit_1 = profit_target_1 - entry_price
+        potential_profit_2 = profit_target_2 - entry_price
+
+        logger.info(f"BEARISH FVG LONG SETUP (3 CONTRACTS):")
         logger.info(f"  Zone: {fvg['bottom']:.2f} - {fvg['top']:.2f} ({fvg['gap_size']:.2f}pts)")
         logger.info(f"  Current Price: {current_price:.2f}")
         logger.info(f"  Entry Price (Market): {entry_price:.2f}")
         logger.info(f"  Stop Loss: {stop_loss:.2f}")
-        logger.info(f"  Profit Target: {profit_target:.2f} (zone top)")
-        logger.info(f"  Potential Profit: {potential_profit:.2f}pts")
+        logger.info(f"  Exit 1: {self.partial_exit_qty} contracts @ {profit_target_1:.2f} (+{potential_profit_1:.2f}pts)")
+        logger.info(f"  Exit 2: 1 contract @ {profit_target_2:.2f} (zone top, +{potential_profit_2:.2f}pts)")
 
-        # Check minimum profit target requirement
-        if potential_profit < self.min_profit_target_points:
-            logger.info(f"  *** TRADE REJECTED: Profit target {potential_profit:.2f}pts < minimum {self.min_profit_target_points:.2f}pts ***")
+        # Check minimum profit target requirement for first exit
+        if potential_profit_1 < self.min_profit_target_points:
+            logger.info(f"  *** TRADE REJECTED: Profit target 1 {potential_profit_1:.2f}pts < minimum {self.min_profit_target_points:.2f}pts ***")
             fvg['trade_taken'] = True  # Mark as taken so we don't re-evaluate
             return
 
@@ -391,16 +416,21 @@ class FVGATITradingBot:
             direction='LONG',
             entry_price=entry_price,
             stop_loss=stop_loss,
-            profit_target=profit_target,
+            profit_target_1=profit_target_1,
+            profit_target_2=profit_target_2,
+            qty_1=self.partial_exit_qty,
+            qty_2=1,
             zone_type=fvg['type'],
-            datetime=datetime.now(),
+            signal_datetime=datetime.now(),
             gap_size=fvg['gap_size'],
             zone_bottom=fvg['bottom'],
             zone_top=fvg['top']
         )
 
         fvg['trade_taken'] = True
-        logger.info(f"LONG SIGNAL: Entry {entry_price:.2f}, SL {stop_loss:.2f}, PT {profit_target:.2f}")
+        logger.info(f"LONG SIGNAL: Entry {entry_price:.2f}, SL {stop_loss:.2f}")
+        logger.info(f"  PT1: {profit_target_1:.2f} ({self.partial_exit_qty} contracts)")
+        logger.info(f"  PT2: {profit_target_2:.2f} (1 contract at zone top)")
     
     def evaluate_short_entry(self, fvg, current_price):
         """Evaluate short entry on BULLISH FVG retest (fill top to bottom)"""
@@ -408,23 +438,29 @@ class FVGATITradingBot:
 
         # Use current price as entry since price is inside the zone
         entry_price = self.round_to_quarter(current_price)
-        stop_loss = self.round_to_quarter(fvg['top'] + fvg['gap_size'])
-        profit_target = self.round_to_quarter(fvg['bottom'])
+        # Stop loss: minimum 10 points above entry or gap size, whichever is larger
+        stop_distance = max(10.0, fvg['gap_size'])
+        stop_loss = self.round_to_quarter(fvg['top'] + stop_distance)
+
+        # Exit strategy: 2 contracts at 5 points, 1 contract at zone bottom
+        profit_target_1 = self.round_to_quarter(entry_price - self.partial_exit_points)
+        profit_target_2 = self.round_to_quarter(fvg['bottom'])  # Zone boundary for final contract
 
         # Calculate potential profit (for SHORT: entry - target)
-        potential_profit = entry_price - profit_target
+        potential_profit_1 = entry_price - profit_target_1
+        potential_profit_2 = entry_price - profit_target_2
 
-        logger.info(f"BULLISH FVG SHORT SETUP:")
+        logger.info(f"BULLISH FVG SHORT SETUP (3 CONTRACTS):")
         logger.info(f"  Zone: {fvg['bottom']:.2f} - {fvg['top']:.2f} ({fvg['gap_size']:.2f}pts)")
         logger.info(f"  Current Price: {current_price:.2f}")
         logger.info(f"  Entry Price (Market): {entry_price:.2f}")
         logger.info(f"  Stop Loss: {stop_loss:.2f}")
-        logger.info(f"  Profit Target: {profit_target:.2f} (zone bottom)")
-        logger.info(f"  Potential Profit: {potential_profit:.2f}pts")
+        logger.info(f"  Exit 1: {self.partial_exit_qty} contracts @ {profit_target_1:.2f} (+{potential_profit_1:.2f}pts)")
+        logger.info(f"  Exit 2: 1 contract @ {profit_target_2:.2f} (zone bottom, +{potential_profit_2:.2f}pts)")
 
-        # Check minimum profit target requirement
-        if potential_profit < self.min_profit_target_points:
-            logger.info(f"  *** TRADE REJECTED: Profit target {potential_profit:.2f}pts < minimum {self.min_profit_target_points:.2f}pts ***")
+        # Check minimum profit target requirement for first exit
+        if potential_profit_1 < self.min_profit_target_points:
+            logger.info(f"  *** TRADE REJECTED: Profit target 1 {potential_profit_1:.2f}pts < minimum {self.min_profit_target_points:.2f}pts ***")
             fvg['trade_taken'] = True  # Mark as taken so we don't re-evaluate
             return
 
@@ -434,16 +470,21 @@ class FVGATITradingBot:
             direction='SHORT',
             entry_price=entry_price,
             stop_loss=stop_loss,
-            profit_target=profit_target,
+            profit_target_1=profit_target_1,
+            profit_target_2=profit_target_2,
+            qty_1=self.partial_exit_qty,
+            qty_2=1,
             zone_type=fvg['type'],
-            datetime=datetime.now(),
+            signal_datetime=datetime.now(),
             gap_size=fvg['gap_size'],
             zone_bottom=fvg['bottom'],
             zone_top=fvg['top']
         )
 
         fvg['trade_taken'] = True
-        logger.info(f"SHORT SIGNAL: Entry {entry_price:.2f}, SL {stop_loss:.2f}, PT {profit_target:.2f}")
+        logger.info(f"SHORT SIGNAL: Entry {entry_price:.2f}, SL {stop_loss:.2f}")
+        logger.info(f"  PT1: {profit_target_1:.2f} ({self.partial_exit_qty} contracts)")
+        logger.info(f"  PT2: {profit_target_2:.2f} (1 contract at zone bottom)")
     
     def check_fvg_fill_status(self, df, current_index):
         """Check if any FVGs have been filled by completed bars"""
@@ -529,13 +570,14 @@ class FVGATITradingBot:
         if current_price is None:
             return
 
-        print("="*80)
-        print(f"FVG Trading Bot")
-        print(f"Time: {datetime.now().strftime('%H:%M:%S')}")
-        print(f"Instrument: {self.instrument}")
-        print(f"Current Price: {current_price:.2f}")
-        print(f"Strategy Status: {'ENABLED' if self.strategy_enabled else 'DISABLED'}")
-       
+        # Build the entire display as a string buffer first
+        lines = []
+        lines.append("="*80)
+        lines.append(f"  FVG TRADING BOT - LIVE MONITORING")
+        lines.append(f"  Time: {datetime.now().strftime('%H:%M:%S')} | Instrument: {self.instrument} | Current Price: {current_price:.2f}")
+        lines.append(f"  Strategy: {'ENABLED' if self.strategy_enabled else 'DISABLED'} | Contracts: {self.max_position_size} (Exit: {self.partial_exit_qty}@{self.partial_exit_points:.0f}pts, 1@zone)")
+        lines.append("="*80)
+        lines.append("")
 
         # Get all active FVGs and calculate distances
         active_fvgs = [fvg for fvg in self.active_fvgs if not fvg['filled']]
@@ -557,55 +599,57 @@ class FVGATITradingBot:
             bullish_sorted = [item for item in fvgs_with_distance if item['fvg']['type'] == 'bullish']
             bearish_sorted = [item for item in fvgs_with_distance if item['fvg']['type'] == 'bearish']
 
-            print(f"ACTIVE FVG ZONES")
-            print(f"Total Active: {len(active_fvgs)} | Bullish: {len(bullish_sorted)} | Bearish: {len(bearish_sorted)}")
-            print("-"*80)
-
-            # Display BEARISH gaps
-            print(f"\nBEARISH GAPS (LONG OPPORTUNITIES)")
-            print(f"{'Zone Range':<25} {'Gap Size':<12} {'Distance':<15}")
-            print("-"*55)
+            # Display BEARISH gaps (bottom first - closest to price when looking for longs)
+            lines.append(f"BEARISH GAPS (LONG OPPORTUNITIES)")
+            lines.append(f"{'Zone Range':<25} {'Gap Size':<12} {'Distance':<15}")
+            lines.append("-"*55)
             if bearish_sorted:
                 for item in bearish_sorted:
                     fvg = item['fvg']
                     distance = item['distance']
+                    # Show BOTTOM first for bearish zones (price approaches from below)
                     zone_range = f"{fvg['bottom']:.2f} - {fvg['top']:.2f}"
                     gap_size = f"{fvg['gap_size']:.2f}pts"
                     distance_str = f"{distance:.2f}pts"
 
                     # Highlight zones within 5 points
                     if distance <= 5.0:
-                        print(f">>> {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                        lines.append(f">>> {zone_range:<22} {gap_size:<12} {distance_str:<15}")
                     else:
-                        print(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                        lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
             else:
-                print("    No bearish gaps")
+                lines.append("    No bearish gaps")
 
-            # Display BULLISH gaps
-            print(f"\nBULLISH GAPS (SHORT OPPORTUNITIES)")
-            print(f"{'Zone Range':<25} {'Gap Size':<12} {'Distance':<15}")
-            print("-"*55)
+            # Display BULLISH gaps (top first - closest to price when looking for shorts)
+            lines.append(f"\nBULLISH GAPS (SHORT OPPORTUNITIES)")
+            lines.append(f"{'Zone Range':<25} {'Gap Size':<12} {'Distance':<15}")
+            lines.append("-"*55)
             if bullish_sorted:
                 for item in bullish_sorted:
                     fvg = item['fvg']
                     distance = item['distance']
-                    zone_range = f"{fvg['bottom']:.2f} - {fvg['top']:.2f}"
+                    # Show TOP first for bullish zones (price approaches from above)
+                    zone_range = f"{fvg['top']:.2f} - {fvg['bottom']:.2f}"
                     gap_size = f"{fvg['gap_size']:.2f}pts"
                     distance_str = f"{distance:.2f}pts"
 
                     # Highlight zones within 5 points
                     if distance <= 5.0:
-                        print(f">>> {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                        lines.append(f">>> {zone_range:<22} {gap_size:<12} {distance_str:<15}")
                     else:
-                        print(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                        lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
             else:
-                print("    No bullish gaps")
+                lines.append("    No bullish gaps")
 
-            print("-"*80)
+            lines.append("-"*80)
         else:
-            print("\nNo active FVGs")
+            lines.append("\nNo active FVGs")
 
-        print("="*80)
+        lines.append("="*80)
+
+        # Print all lines at once with proper flushing
+        output = '\n'.join(lines)
+        print(output, end='', flush=True)
     
     def run(self):
         """Main trading loop"""
@@ -621,6 +665,20 @@ class FVGATITradingBot:
         logger.info("Monitoring HistoricalData.csv for new hourly bars and FVGs...")
         logger.info("Monitoring LiveFeed.csv for real-time price updates...")
         logger.info("Display updates every second with live price data...")
+
+        # Enable ANSI escape codes for Windows 10+
+        if os.name == 'nt':
+            os.system('color')
+
+        # Hide cursor for cleaner display
+        if os.name == 'nt':
+            # Windows cursor control
+            os.system('echo off')
+        else:
+            print('\033[?25l', end='', flush=True)
+
+        # Clear screen once at startup
+        os.system('cls' if os.name == 'nt' else 'clear')
 
         try:
             while True:
@@ -646,13 +704,28 @@ class FVGATITradingBot:
                 time.sleep(1)
 
         except KeyboardInterrupt:
+            # Show cursor again before exiting
+            if os.name == 'nt':
+                os.system('echo on')
+            else:
+                print('\033[?25h', end='', flush=True)
             logger.info("\nStopping FVG ATI Trading Bot...")
             logger.info(f"Final active FVGs: {len(self.active_fvgs)}")
         except Exception as e:
+            # Show cursor again on error
+            if os.name == 'nt':
+                os.system('echo on')
+            else:
+                print('\033[?25h', end='', flush=True)
             logger.error(f"Error in main loop: {e}")
             import traceback
             logger.error(traceback.format_exc())
         finally:
+            # Ensure cursor is visible
+            if os.name == 'nt':
+                os.system('echo on')
+            else:
+                print('\033[?25h', end='', flush=True)
             logger.info("FVG Bot stopped")
 
 if __name__ == "__main__":
