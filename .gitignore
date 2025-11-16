@@ -1,48 +1,41 @@
-# Python
+# Python Virtual Environment
+venv/
+env/
+ENV/
+*.pyc
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-ENV/
-*.egg-info/
-dist/
-build/
-*.egg
 
-# Virtual Environment
-venv/
-ENV/
-env/
+# NinjaTrader Data Files
+data/*.csv
+!data/.gitkeep
 
-# IDE
+# IDE and Editor Files
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-
-# Data files (CSV outputs - exclude live data)
-# Allowing data folder to be tracked in git
-*.csv
-!data/*.csv
-!requirements.txt
-
-# Logs
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
-nul
-
-# NinjaTrader specific
 *.suo
 *.user
+*.sln.docstates
+
+# Build Files
 bin/
 obj/
+*.dll
+*.exe
 
-# Claude Flow
-.claude-flow/
+# OS Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Configuration
+.claude/settings.local.json
+
+# Log Files
+*.log
+logs/
+
+# Temporary Files
+*.tmp
+*.bak
+*.swp
+*~

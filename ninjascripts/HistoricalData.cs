@@ -15,6 +15,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string filePath;
         private bool isFileInitialized = false;
 
+        // EMA Indicators
+        private EMA ema21;
+        private EMA ema75;
+        private EMA ema150;
+
         protected override void OnStateChange()
         {
             if (State == State.SetDefaults)
@@ -28,6 +33,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.Configure)
             {
                 filePath = @"C:\Users\Joshua\Documents\Projects\FVG Bot\data\HistoricalData.csv";
+            }
+            else if (State == State.DataLoaded)
+            {
+                // Initialize EMA indicators
+                ema21 = EMA(21);
+                ema75 = EMA(75);
+                ema150 = EMA(150);
             }
         }
 
@@ -56,7 +68,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Create file with header
                 using (StreamWriter writer = new StreamWriter(filePath, false))
                 {
-                    writer.WriteLine("DateTime,Open,High,Low,Close");
+                    writer.WriteLine("DateTime,Open,High,Low,Close,EMA21,EMA75,EMA150");
                 }
             }
             catch (Exception ex)
@@ -73,11 +85,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (Time.Count == 0 || Open.Count == 0 || High.Count == 0 || Low.Count == 0 || Close.Count == 0)
                     return;
 
-                // Write completed bar to file
+                // Write completed bar to file with EMA values
                 using (StreamWriter writer = new StreamWriter(filePath, true))
                 {
                     writer.WriteLine(
-                        $"{Time[0]:MM/dd/yyyy HH:mm:ss},{Open[0]:F2},{High[0]:F2},{Low[0]:F2},{Close[0]:F2}"
+                        $"{Time[0]:MM/dd/yyyy HH:mm:ss},{Open[0]:F2},{High[0]:F2},{Low[0]:F2},{Close[0]:F2},{ema21[0]:F2},{ema75[0]:F2},{ema150[0]:F2}"
                     );
                 }
             }
