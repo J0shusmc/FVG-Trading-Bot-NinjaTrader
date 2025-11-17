@@ -193,12 +193,14 @@ class FVGATITradingBot:
         """Check if FVG has been filled by subsequent price action"""
         for j in range(start_index + 1, len(df)):
             check_candle = df.iloc[j]
-            
-            if fvg['type'] == 'bullish' and check_candle['Close'] <= fvg['bottom']:
+
+            # Bullish FVG fills when price touches/closes at or below the bottom
+            if fvg['type'] == 'bullish' and check_candle['Low'] <= fvg['bottom']:
                 return True
-            elif fvg['type'] == 'bearish' and check_candle['Close'] >= fvg['top']:
+            # Bearish FVG fills when price touches/closes at or above the top
+            elif fvg['type'] == 'bearish' and check_candle['High'] >= fvg['top']:
                 return True
-                
+
         return False
     
     def process_historical_bars(self):
@@ -392,12 +394,14 @@ class FVGATITradingBot:
             if fvg['filled']:
                 continue
 
-            if fvg['type'] == 'bullish' and current_bar['Close'] <= fvg['bottom']:
+            # Bullish FVG fills when price touches/closes at or below the bottom
+            if fvg['type'] == 'bullish' and current_bar['Low'] <= fvg['bottom']:
                 fvg['filled'] = True
-                logger.info(f"BULLISH FVG FILLED at {current_bar['Close']:.2f}")
-            elif fvg['type'] == 'bearish' and current_bar['Close'] >= fvg['top']:
+                logger.info(f"BULLISH FVG FILLED: Low {current_bar['Low']:.2f} touched bottom {fvg['bottom']:.2f}")
+            # Bearish FVG fills when price touches/closes at or above the top
+            elif fvg['type'] == 'bearish' and current_bar['High'] >= fvg['top']:
                 fvg['filled'] = True
-                logger.info(f"BEARISH FVG FILLED at {current_bar['Close']:.2f}")
+                logger.info(f"BEARISH FVG FILLED: High {current_bar['High']:.2f} touched top {fvg['top']:.2f}")
 
     def check_live_fvg_fills(self, current_price):
         """Check if any FVGs have been filled by current live price"""
@@ -405,7 +409,7 @@ class FVGATITradingBot:
             if fvg['filled']:
                 continue
 
-            # Bearish FVG fills when price reaches the TOP (zone filled completely)
+            # Bearish FVG fills when current price reaches or exceeds the TOP
             if fvg['type'] == 'bearish' and current_price >= fvg['top']:
                 fvg['filled'] = True
                 logger.info(f"*** BEARISH FVG FILLED (LIVE) ***")
@@ -413,7 +417,7 @@ class FVGATITradingBot:
                 logger.info(f"  Fill Price: {current_price:.2f}")
                 logger.info(f"  Zone removed from active list")
 
-            # Bullish FVG fills when price reaches the BOTTOM (zone filled completely)
+            # Bullish FVG fills when current price reaches or goes below the BOTTOM
             elif fvg['type'] == 'bullish' and current_price <= fvg['bottom']:
                 fvg['filled'] = True
                 logger.info(f"*** BULLISH FVG FILLED (LIVE) ***")
