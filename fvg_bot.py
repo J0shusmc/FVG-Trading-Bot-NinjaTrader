@@ -311,7 +311,7 @@ class FVGATITradingBot:
                     self.active_fvgs.append(fvg)
                     logger.info(f"NEW BEARISH FVG: Gap {gap_size:.2f}pts ({candle3['High']:.2f} to {candle1['Low']:.2f})")
 
-        # Clean up old FVGs
+        # Clean up old FVGs (without current price - will use bar age)
         self.clean_old_fvgs(current_index)
     
     def check_fvg_retest_signals(self, current_price):
@@ -445,23 +445,28 @@ class FVGATITradingBot:
         logger.info(f"  - {bullish_count} bullish FVGs")
         logger.info(f"  - {bearish_count} bearish FVGs")
 
-    def clean_old_fvgs(self, current_index):
-        """Remove old or filled FVGs"""
+    def clean_old_fvgs(self, current_index, current_price=None):
+        """Remove filled FVGs or those too far from current price"""
         cleaned_fvgs = []
         for fvg in self.active_fvgs:
             # Remove filled FVGs
             if fvg['filled']:
                 continue
 
-            # Keep FVGs if less than 100 bars old
-            if current_index - fvg['index'] < 100:
+            # If we have current price, filter by distance (250 points)
+            if current_price is not None:
+                distance = min(abs(current_price - fvg['bottom']), abs(current_price - fvg['top']))
+                if distance <= 250:
+                    cleaned_fvgs.append(fvg)
+            else:
+                # Fallback: keep all unfilled FVGs when no price available
                 cleaned_fvgs.append(fvg)
 
         removed_count = len(self.active_fvgs) - len(cleaned_fvgs)
         self.active_fvgs = cleaned_fvgs
 
         if removed_count > 0:
-            logger.info(f"Cleaned {removed_count} old/filled FVGs")
+            logger.info(f"Cleaned {removed_count} FVGs (filled or >250pts away)")
     
     def display_status(self, current_price):
         """Display current bot status with real-time updates"""
@@ -593,6 +598,12 @@ class FVGATITradingBot:
 
                     # Check for trade signals based on current price
                     self.check_fvg_retest_signals(current_price)
+
+                    # Clean FVGs based on distance from current price
+                    df = self.read_historical_data()
+                    if df is not None and len(df) > 0:
+                        current_index = len(df) - 1
+                        self.clean_old_fvgs(current_index, current_price)
 
                     # Display status with current price
                     self.clear_screen()
