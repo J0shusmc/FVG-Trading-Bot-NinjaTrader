@@ -503,11 +503,8 @@ class FVGATITradingBot:
 
         # Build the entire display as a string buffer first
         lines = []
-        lines.append("="*80)
-        lines.append(f"  FVG TRADING BOT - LIVE MONITORING")
-        lines.append(f"  Time: {datetime.now().strftime('%H:%M:%S')} | Instrument: {self.instrument} | Current Price: {current_price:.2f}")
-        lines.append(f"  Strategy: {'ENABLED' if self.strategy_enabled else 'DISABLED'}")
-        lines.append("="*80)
+        lines.append(f"        FVG TRADING BOT - Strategy: {'ENABLED' if self.strategy_enabled else 'DISABLED'}")
+        lines.append("="*60)
         lines.append("")
 
         # Get all active FVGs and calculate distances
@@ -530,12 +527,12 @@ class FVGATITradingBot:
             bullish_sorted = [item for item in fvgs_with_distance if item['fvg']['type'] == 'bullish']
             bearish_sorted = [item for item in fvgs_with_distance if item['fvg']['type'] == 'bearish']
 
-            # Display BEARISH gaps (bottom first - closest to price when looking for longs)
-            lines.append(f"BEARISH GAPS (LONG OPPORTUNITIES)")
-            lines.append(f"{'Zone Range':<25} {'Gap Size':<12} {'Distance':<15}")
-            lines.append("-"*55)
+            # Display BEARISH gaps (reversed - furthest first, closest to center last)
+            lines.append("   BEARISH GAPS (LONG)     Gap Size     Distance       ")
+            lines.append("-"*60)
             if bearish_sorted:
-                for item in bearish_sorted:
+                # Reverse the order so furthest gaps are at top, closest to center at bottom
+                for item in reversed(bearish_sorted):
                     fvg = item['fvg']
                     distance = item['distance']
                     # Show BOTTOM first for bearish zones (price approaches from below)
@@ -543,18 +540,18 @@ class FVGATITradingBot:
                     gap_size = f"{fvg['gap_size']:.2f}pts"
                     distance_str = f"{distance:.2f}pts"
 
-                    # Highlight zones within 5 points
-                    if distance <= 5.0:
-                        lines.append(f">>> {zone_range:<22} {gap_size:<12} {distance_str:<15}")
-                    else:
-                        lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                    lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
             else:
                 lines.append("    No bearish gaps")
 
+            # Center line with time, instrument, and price
+            lines.append("")
+            time_str = datetime.now().strftime('%H:%M:%S')
+            center_line = f" {time_str} | Instrument: {self.instrument} | Current Price: {current_price:.2f}"
+            lines.append(center_line)
+            lines.append("")
+
             # Display BULLISH gaps (top first - closest to price when looking for shorts)
-            lines.append(f"\nBULLISH GAPS (SHORT OPPORTUNITIES)")
-            lines.append(f"{'Zone Range':<25} {'Gap Size':<12} {'Distance':<15}")
-            lines.append("-"*55)
             if bullish_sorted:
                 for item in bullish_sorted:
                     fvg = item['fvg']
@@ -564,19 +561,16 @@ class FVGATITradingBot:
                     gap_size = f"{fvg['gap_size']:.2f}pts"
                     distance_str = f"{distance:.2f}pts"
 
-                    # Highlight zones within 5 points
-                    if distance <= 5.0:
-                        lines.append(f">>> {zone_range:<22} {gap_size:<12} {distance_str:<15}")
-                    else:
-                        lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                    lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
             else:
                 lines.append("    No bullish gaps")
 
-            lines.append("-"*80)
+            lines.append("-"*60)
+            lines.append("  BULLISH GAPS (SHORT)     Gap Size     Distance       ")
         else:
             lines.append("\nNo active FVGs")
 
-        lines.append("="*80)
+        lines.append("="*60)
 
         # Print all lines at once with proper flushing
         output = '\n'.join(lines)
@@ -586,11 +580,11 @@ class FVGATITradingBot:
         """Main trading loop"""
         logger.info("Starting FVG Trading Bot...")
         logger.info("Monitoring Fair Value Gaps in real-time")
-        logger.info("="*60)
+        logger.info("="*50)
 
         # Load historical FVGs on startup
         self.load_historical_fvgs()
-        logger.info("="*60)
+        logger.info("="*50)
 
         logger.info(f"FVG signal generation enabled for {self.instrument}")
         logger.info("Monitoring HistoricalData.csv for new hourly bars and FVGs...")
