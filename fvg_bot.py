@@ -168,7 +168,7 @@ class FVGATITradingBot:
                         'index': i,
                         'filled': False,
                         'trade_taken': False,
-                        'last_trade_time': None,
+                        'trade_bar_timestamp': None,  # Track which bar the trade occurred in
                         'price_was_outside': True  # Track if price was outside zone
                     }
                     fvgs.append(fvg)
@@ -186,7 +186,7 @@ class FVGATITradingBot:
                         'index': i,
                         'filled': False,
                         'trade_taken': False,
-                        'last_trade_time': None,
+                        'trade_bar_timestamp': None,  # Track which bar the trade occurred in
                         'price_was_outside': True  # Track if price was outside zone
                     }
                     fvgs.append(fvg)
@@ -224,6 +224,9 @@ class FVGATITradingBot:
         if is_new_bar:
             logger.info(f"New hourly bar detected at {latest_bar_time}")
 
+            # Re-enable zones that were waiting for next bar
+            self.check_zone_cooldowns(latest_bar_time)
+
             # Look for new FVGs
             self.find_new_fvgs(df, current_index)
 
@@ -232,6 +235,21 @@ class FVGATITradingBot:
 
             self.last_processed_bar_time = latest_bar_time
     
+    def check_zone_cooldowns(self, latest_bar_time):
+        """Re-enable zones that were waiting for next bar"""
+        for fvg in self.active_fvgs:
+            if fvg['filled']:
+                continue
+
+            # If zone had a trade and is in cooldown
+            if fvg['trade_taken'] and fvg['trade_bar_timestamp'] is not None:
+                # Check if the new bar is more recent than the bar when trade was taken
+                if latest_bar_time > fvg['trade_bar_timestamp']:
+                    # Re-enable trading for this zone
+                    fvg['trade_taken'] = False
+                    fvg['price_was_outside'] = True  # Reset entry detection
+                    logger.info(f"Zone cooldown complete - re-enabling trades for {fvg['type']} zone {fvg['bottom']:.2f}-{fvg['top']:.2f}")
+
     def clear_screen(self):
         """Clear screen - optimized for Windows"""
         if os.name == 'nt':
@@ -281,6 +299,9 @@ class FVGATITradingBot:
         candle2 = df.iloc[current_index - 1]
         candle3 = df.iloc[current_index]
 
+        # Get current price to check if we're already inside the new zone
+        current_price = self.read_current_price()
+
         # Check for bullish FVG
         if candle3['Low'] > candle1['High']:
             gap_size = candle3['Low'] - candle1['High']
@@ -294,12 +315,23 @@ class FVGATITradingBot:
                     'index': current_index,
                     'filled': False,
                     'trade_taken': False,
-                    'last_trade_time': None,
+                    'trade_bar_timestamp': None,  # Track which bar the trade occurred in
                     'price_was_outside': True  # Track if price was outside zone
                 }
+
+                # Check if current price is already inside this new zone
+                if current_price is not None:
+                    price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
+                    if price_in_zone:
+                        fvg['price_was_outside'] = False
+                        logger.info(f"NEW BULLISH FVG: Gap {gap_size:.2f}pts ({candle1['High']:.2f} to {candle3['Low']:.2f}) - Price already in zone")
+                    else:
+                        logger.info(f"NEW BULLISH FVG: Gap {gap_size:.2f}pts ({candle1['High']:.2f} to {candle3['Low']:.2f})")
+                else:
+                    logger.info(f"NEW BULLISH FVG: Gap {gap_size:.2f}pts ({candle1['High']:.2f} to {candle3['Low']:.2f})")
+
                 if not self.is_duplicate_zone(fvg):
                     self.active_fvgs.append(fvg)
-                    logger.info(f"NEW BULLISH FVG: Gap {gap_size:.2f}pts ({candle1['High']:.2f} to {candle3['Low']:.2f})")
 
         # Check for bearish FVG
         elif candle3['High'] < candle1['Low']:
@@ -314,12 +346,23 @@ class FVGATITradingBot:
                     'index': current_index,
                     'filled': False,
                     'trade_taken': False,
-                    'last_trade_time': None,
+                    'trade_bar_timestamp': None,  # Track which bar the trade occurred in
                     'price_was_outside': True  # Track if price was outside zone
                 }
+
+                # Check if current price is already inside this new zone
+                if current_price is not None:
+                    price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
+                    if price_in_zone:
+                        fvg['price_was_outside'] = False
+                        logger.info(f"NEW BEARISH FVG: Gap {gap_size:.2f}pts ({candle3['High']:.2f} to {candle1['Low']:.2f}) - Price already in zone")
+                    else:
+                        logger.info(f"NEW BEARISH FVG: Gap {gap_size:.2f}pts ({candle3['High']:.2f} to {candle1['Low']:.2f})")
+                else:
+                    logger.info(f"NEW BEARISH FVG: Gap {gap_size:.2f}pts ({candle3['High']:.2f} to {candle1['Low']:.2f})")
+
                 if not self.is_duplicate_zone(fvg):
                     self.active_fvgs.append(fvg)
-                    logger.info(f"NEW BEARISH FVG: Gap {gap_size:.2f}pts ({candle3['High']:.2f} to {candle1['Low']:.2f})")
 
         # Clean up old FVGs (without current price - will use bar age)
         self.clean_old_fvgs(current_index)
@@ -329,22 +372,12 @@ class FVGATITradingBot:
         if not self.strategy_enabled:
             return
 
-        current_time = datetime.now()
-
         for fvg in self.active_fvgs:
             # Skip if filled
             if fvg['filled']:
                 continue
 
-            # Reset trade_taken flag if 1 hour has passed since last trade
-            if fvg['trade_taken'] and fvg['last_trade_time'] is not None:
-                time_since_trade = (current_time - fvg['last_trade_time']).total_seconds() / 3600  # hours
-                if time_since_trade >= 1.0:
-                    fvg['trade_taken'] = False
-                    fvg['price_was_outside'] = True  # Reset entry detection
-                    logger.info(f"Zone cooldown expired - re-enabling trades for {fvg['type']} zone {fvg['bottom']:.2f}-{fvg['top']:.2f}")
-
-            # Skip if recently traded (within 1 hour cooldown)
+            # Skip if recently traded (waiting for next bar)
             if fvg['trade_taken']:
                 continue
 
@@ -388,8 +421,12 @@ class FVGATITradingBot:
             gap_size=fvg['gap_size']
         )
 
+        # Mark trade taken and record the latest closed bar timestamp
         fvg['trade_taken'] = True
-        fvg['last_trade_time'] = datetime.now()
+        df = self.read_historical_data()
+        if df is not None and len(df) > 0:
+            fvg['trade_bar_timestamp'] = df.iloc[-1]['DateTime']
+            logger.info(f"  Trade cooldown active - waiting for next bar after {fvg['trade_bar_timestamp']}")
     
     def evaluate_short_entry(self, fvg, current_price):
         """Evaluate short entry on BULLISH FVG retest"""
@@ -407,8 +444,12 @@ class FVGATITradingBot:
             gap_size=fvg['gap_size']
         )
 
+        # Mark trade taken and record the latest closed bar timestamp
         fvg['trade_taken'] = True
-        fvg['last_trade_time'] = datetime.now()
+        df = self.read_historical_data()
+        if df is not None and len(df) > 0:
+            fvg['trade_bar_timestamp'] = df.iloc[-1]['DateTime']
+            logger.info(f"  Trade cooldown active - waiting for next bar after {fvg['trade_bar_timestamp']}")
     
     def check_fvg_fill_status(self, df, current_index):
         """Check if any FVGs have been filled by completed bars"""
@@ -458,6 +499,9 @@ class FVGATITradingBot:
             logger.info("Not enough historical data to scan for FVGs")
             return
 
+        # Get current price to check if we're already inside any zones
+        current_price = self.read_current_price()
+
         # Find all FVGs in historical data
         historical_fvgs = self.find_fvgs_in_data(df)
 
@@ -465,6 +509,14 @@ class FVGATITradingBot:
         for fvg in historical_fvgs:
             if not self.is_fvg_filled(fvg, df, fvg['index']):
                 if not self.is_duplicate_zone(fvg):
+                    # Check if current price is already inside this zone
+                    if current_price is not None:
+                        price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
+                        if price_in_zone:
+                            # Price is already in the zone, mark it so we don't immediately trade
+                            fvg['price_was_outside'] = False
+                            logger.info(f"Price already in {fvg['type']} zone {fvg['bottom']:.2f}-{fvg['top']:.2f} at startup")
+
                     self.active_fvgs.append(fvg)
 
         logger.info(f"Loaded {len(self.active_fvgs)} active FVGs from historical data")
@@ -501,9 +553,13 @@ class FVGATITradingBot:
         if current_price is None:
             return
 
+        # Check if any zones are in cooldown
+        zones_in_cooldown = any(fvg['trade_taken'] for fvg in self.active_fvgs if not fvg['filled'])
+        system_status = "WAITING (next bar)" if zones_in_cooldown else "ENABLED"
+
         # Build the entire display as a string buffer first
         lines = []
-        lines.append(f"        FVG TRADING BOT - Strategy: {'ENABLED' if self.strategy_enabled else 'DISABLED'}")
+        lines.append(f"        FVG TRADING BOT - System: {system_status}")
         lines.append("="*60)
         lines.append("")
 
@@ -514,14 +570,24 @@ class FVGATITradingBot:
             # Add distance to each FVG and sort by distance
             fvgs_with_distance = []
             for fvg in active_fvgs:
-                distance = min(abs(current_price - fvg['bottom']), abs(current_price - fvg['top']))
+                # Calculate distance to entry point
+                # Positive = price must go UP, Negative = price must go DOWN
+                if fvg['type'] == 'bearish':
+                    # For LONG zones: entry at BOTTOM
+                    # Positive if price needs to rise to reach bottom
+                    distance = fvg['bottom'] - current_price
+                else:  # bullish
+                    # For SHORT zones: entry at TOP
+                    # Negative if price needs to drop to reach top
+                    distance = fvg['top'] - current_price
+
                 fvgs_with_distance.append({
                     'fvg': fvg,
                     'distance': distance
                 })
 
-            # Sort by distance (closest first)
-            fvgs_with_distance.sort(key=lambda x: x['distance'])
+            # Sort by absolute distance (closest first)
+            fvgs_with_distance.sort(key=lambda x: abs(x['distance']))
 
             # Separate by type but keep distance ordering
             bullish_sorted = [item for item in fvgs_with_distance if item['fvg']['type'] == 'bullish']
@@ -538,9 +604,14 @@ class FVGATITradingBot:
                     # Show BOTTOM first for bearish zones (price approaches from below)
                     zone_range = f"{fvg['bottom']:.2f} - {fvg['top']:.2f}"
                     gap_size = f"{fvg['gap_size']:.2f}pts"
-                    distance_str = f"{distance:.2f}pts"
+                    # Show signed distance (negative = already past entry point)
+                    distance_str = f"{distance:+.2f}pts" if distance < 0 else f"{distance:.2f}pts"
 
-                    lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                    # Check if price is currently in this zone
+                    price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
+                    zone_annotation = "In Zone" if price_in_zone else ""
+
+                    lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<12}{zone_annotation}")
             else:
                 lines.append("    No bearish gaps")
 
@@ -559,9 +630,14 @@ class FVGATITradingBot:
                     # Show TOP first for bullish zones (price approaches from above)
                     zone_range = f"{fvg['top']:.2f} - {fvg['bottom']:.2f}"
                     gap_size = f"{fvg['gap_size']:.2f}pts"
-                    distance_str = f"{distance:.2f}pts"
+                    # Show signed distance (negative = already past entry point)
+                    distance_str = f"{distance:+.2f}pts" if distance < 0 else f"{distance:.2f}pts"
 
-                    lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<15}")
+                    # Check if price is currently in this zone
+                    price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
+                    zone_annotation = "In Zone" if price_in_zone else ""
+
+                    lines.append(f"    {zone_range:<22} {gap_size:<12} {distance_str:<12}{zone_annotation}")
             else:
                 lines.append("    No bullish gaps")
 
