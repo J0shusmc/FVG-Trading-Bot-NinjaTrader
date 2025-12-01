@@ -121,6 +121,13 @@ class FVGATITradingBot:
             if df.empty:
                 return None
 
+            # Update instrument from data if available
+            if 'Instrument' in df.columns and not df['Instrument'].empty:
+                data_instrument = df['Instrument'].iloc[0]
+                if data_instrument != self.instrument:
+                    self.instrument = data_instrument
+                    logger.info(f"Instrument updated to: {self.instrument}")
+
             df['DateTime'] = pd.to_datetime(df['DateTime'])
             df = df.sort_values('DateTime').reset_index(drop=True)
             return df
@@ -604,8 +611,11 @@ class FVGATITradingBot:
                     # Show BOTTOM first for bearish zones (price approaches from below)
                     zone_range = f"{fvg['bottom']:.2f} - {fvg['top']:.2f}"
                     gap_size = f"{fvg['gap_size']:.2f}pts"
-                    # Show signed distance (negative = already past entry point)
-                    distance_str = f"{distance:+.2f}pts" if distance < 0 else f"{distance:.2f}pts"
+                    # Show signed distance with arrows (↑ = price needs to go up, ↓ = price needs to go down)
+                    if distance > 0:
+                        distance_str = f"↑ {distance:.2f}pts"
+                    else:
+                        distance_str = f"↓ {abs(distance):.2f}pts"
 
                     # Check if price is currently in this zone
                     price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
@@ -630,8 +640,11 @@ class FVGATITradingBot:
                     # Show TOP first for bullish zones (price approaches from above)
                     zone_range = f"{fvg['top']:.2f} - {fvg['bottom']:.2f}"
                     gap_size = f"{fvg['gap_size']:.2f}pts"
-                    # Show signed distance (negative = already past entry point)
-                    distance_str = f"{distance:+.2f}pts" if distance < 0 else f"{distance:.2f}pts"
+                    # Show signed distance with arrows (↑ = price needs to go up, ↓ = price needs to go down)
+                    if distance > 0:
+                        distance_str = f"↑ {distance:.2f}pts"
+                    else:
+                        distance_str = f"↓ {abs(distance):.2f}pts"
 
                     # Check if price is currently in this zone
                     price_in_zone = (current_price >= fvg['bottom'] and current_price <= fvg['top'])
@@ -736,6 +749,6 @@ class FVGATITradingBot:
             logger.info("FVG Bot stopped")
 
 if __name__ == "__main__":
-    # Configure for MES futures
-    bot = FVGATITradingBot(instrument='MES')
+    # Instrument will be auto-detected from HistoricalData.csv
+    bot = FVGATITradingBot(instrument='UNKNOWN')
     bot.run()
